@@ -292,7 +292,7 @@ class App(ctk.CTk):
         self.total_downloaded_bytes = 0
         self.counter_lock = threading.Lock()
         self.queue_box = queue.Queue()
-        for _ in range(5):
+        for _ in range(4):
             threading.Thread(target=self.download_all_task).start()
         self.setup_ui()
 
