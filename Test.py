@@ -10,9 +10,30 @@ import re
 import time
 import queue
 from datetime import datetime
+import logging
+from typing import TypedDict
+
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - [%(levelname)s] - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler("app_log.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("DownloaderApp")
+
+class AppSetting(TypedDict):
+    ffmpeg_path: str
+    save_folder_path: str
+    yt_dlp_path: str
+    download_method: str
+    selected_qual: str
+    rows_count: int
 
 class VideoTask: # Класс должен управлять только тем что сам создал! self нужно использовать только в классе! За пределами класса использую другие названия аргументов
-    def __init__(self, master, on_status_change, del_row, setting, get_mode, save_selected_qual, calculation_rows, total_downloaded_bytes, add_history):
+    def __init__(self, master: ctk.CTkFrame, on_status_change, del_row, setting: AppSetting, get_mode, save_selected_qual, calculation_rows, total_downloaded_bytes, add_history):
         self.master_frame = master
         self.on_status_change = on_status_change
         self.del_row = del_row
@@ -57,20 +78,21 @@ class VideoTask: # Класс должен управлять только те�
         self.is_stopped_by_user = False
         self.is_successfully_downloaded = False
 
-    def save_selected_video_quality(self, event):
-        self.save_selected_qual(event)
+    def save_selected_video_quality(self, selected_value: str) -> None:
+        self.save_selected_qual(selected_value)
 
-    def reset_is_successfully_downloaded(self, event):
+    def reset_is_successfully_downloaded(self, event: tk.Event) -> None:
         if self.is_successfully_downloaded:
             self.is_successfully_downloaded = False
 
-    def stop_downloading(self):
+    def stop_downloading(self) ->None:
         self.is_stopped_by_user = True
         current_mode = self.get_mode()
         if current_mode == "FFMPEG":
             if self.process:
                 self.process.terminate()
             else:
+                self.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
                 self.master_frame.after(0, self.unlock_interface)
         elif current_mode == "YT-DLP":
             if self.process:
@@ -79,7 +101,7 @@ class VideoTask: # Класс должен управлять только те�
                 self.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
                 self.master_frame.after(0, self.unlock_interface)
     
-    def del_the_row(self):
+    def del_the_row(self) -> None:
         if self._is_downloading:
             return
         self.row_frame.destroy()
@@ -88,7 +110,7 @@ class VideoTask: # Класс должен управлять только те�
         if self.calc_the_row:
             self.calc_the_row()
 
-    def lock_interface(self):
+    def lock_interface(self) -> None:
         self._is_downloading = True
         self.is_stopped_by_user = False
         self.link_entry.configure(state="disabled")
@@ -100,7 +122,7 @@ class VideoTask: # Класс должен управлять только те�
         if self.on_status_change:
             self.on_status_change("disabled")
 
-    def unlock_interface(self):
+    def unlock_interface(self) -> None:
         self._is_downloading = False
         self.process = None
         self.link_entry.configure(state="normal")
@@ -111,14 +133,17 @@ class VideoTask: # Класс должен управлять только те�
         if self.on_status_change:
             self.on_status_change("normal")
  
-    def preparing_to_download(self):
+    def preparing_to_download(self) -> None:
         if self._is_downloading:
+            logger.warning("Попытка запустить скачивание когда скачивание уже идёт")
             messagebox.showerror("ОШИБКА", "ПРОЦЕСС ЗАНЯТ")
             return
         if not self.link_entry.get().strip() or not self.video_name.get().strip():
+            logger.warning("Попытка загрузки видео с пустыми полями ссылки или названия видео")
             messagebox.showerror("ОШИБКА", "ЗАПОЛНИТЕ ОБА ПОЛЯ ДЛЯ ЗАГРУЗКИ ВИДЕО")
             return
         if not self.setting['save_folder_path']:
+            logger.warning("Не указана папка для сохранения видео")
             messagebox.showerror("ОШИБКА", "НЕ УКАЗАНА ПАПКА ДЛЯ СОХРАНЕНИЯ ВИДЕО")
             return
         current_mode = self.get_mode()
@@ -131,63 +156,69 @@ class VideoTask: # Класс должен управлять только те�
                 messagebox.showerror("ОШИБКА", "НЕ УКАЗАН ПУТЬ К YT-DLP")
                 return
         self.lock_interface()
-        threading.Thread(target=self.download_task).start()
+        threading.Thread(target=self.download_task, daemon=True).start()
 
-    def download_task(self, open_folder=True):
+    def download_task(self, open_folder: bool = True) -> None:
         self.entry = self.link_entry.get().strip()
         vname = self.video_name.get().strip()
         self.fix_vname = re.sub(r'[\\/:*?"<>|]', "_", vname)
         if self.is_stopped_by_user:
+            logger.warning("Скачивание видео отменено до начала загрузки")
             return
         self.output_file = os.path.join(self.setting.get('save_folder_path', ""), f"{self.fix_vname}.mp4")
         current_mode = self.get_mode()
+        logger.info(f'Начинается скачивание через {current_mode}. Файл {self.fix_vname}')
         if current_mode == 'FFMPEG':
             self.download_via_ffmpeg(open_folder)
         elif current_mode == 'YT-DLP':
             self.download_via_yt_dlp(open_folder)
 
-    def download_via_ffmpeg(self, open_folder):
+    def download_via_ffmpeg(self, open_folder: bool) -> None:
         command = [self.setting.get('ffmpeg_path', ""), "-i", self.entry, '-c', 'copy', self.output_file]
         try:
-            self.process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-            total_duration = 0.0
-            for line in self.process.stderr:
-                match_duration = re.search(r"Duration: (\d{2}:\d{2}:\d{2}\.\d{2})", line)
-                match_time = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line)
-                if match_duration:
-                    clean_time = match_duration.group(1)
-                    total_duration = self.time_to_seconds(clean_time)
-                elif match_time and total_duration > 0:
-                    clean_time = match_time.group(1)
-                    current_time = self.time_to_seconds(clean_time)
-                    progress = current_time / total_duration
-                    percent = int(progress * 100)
-                    self.master_frame.after(0, self.progressbar.set, progress)
-                    self.master_frame.after(0, lambda p=percent: self.progress_percent.configure(text=f'{p}%'))
-            self.process.wait()
-            if self.process.returncode == 0:
-                self.is_successfully_downloaded = True
-                if os.path.exists(self.output_file):
-                    file_size = os.path.getsize(self.output_file)
-                    self.update_total_bytes(file_size)
-                self.master_frame.after(0, self.progressbar.set, 1.0)
-                self.master_frame.after(0, lambda: self.progress_percent.configure(text="100%"))
-                if open_folder:
-                    self.open_folder_after_downloading()
-            else:
-                if self.is_stopped_by_user:
-                    self.del_video_file()
-                    self.master_frame.after(0, self.progress_bar_and_percent_reset)
+            with subprocess.Popen(command, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace') as self.process:
+                total_duration = 0.0
+                for line in self.process.stderr:
+                    match_duration = re.search(r"Duration: (\d{2}:\d{2}:\d{2}\.\d{2})", line)
+                    match_time = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line)
+                    if match_duration:
+                        clean_time = match_duration.group(1)
+                        total_duration = self.time_to_seconds(clean_time)
+                    elif match_time and total_duration > 0:
+                        clean_time = match_time.group(1)
+                        current_time = self.time_to_seconds(clean_time)
+                        progress = current_time / total_duration
+                        percent = int(progress * 100)
+                        self.master_frame.after(0, self.progressbar.set, progress)
+                        self.master_frame.after(0, lambda p=percent: self.progress_percent.configure(text=f'{p}%'))
+                self.process.wait()
+                if self.process.returncode == 0:
+                    self.is_successfully_downloaded = True
+                    self.add_to_history(self.fix_vname, self.entry, "Успешно")
+                    if os.path.exists(self.output_file):
+                        file_size = os.path.getsize(self.output_file)
+                        self.update_total_bytes(file_size)
+                    self.master_frame.after(0, self.progress_bar_and_percent_reset, 1, "100%", "Готово", "green")
+                    self.master_frame.after(0, self.progressbar.set, 1.0)
+                    self.master_frame.after(0, lambda: self.progress_percent.configure(text="100%"))
+                    if open_folder:
+                        self.open_folder_after_downloading()
                 else:
-                    self.master_frame.after(0, self.messages_error, "ОШИБКА", "СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
+                    if self.is_stopped_by_user:
+                        self.del_video_file()
+                        self.master_frame.after(0, self.progress_bar_and_percent_reset, 0, "0%", "Остановлено", "red")
+                    else:
+                        logger.error(f"Скачивание прерванно из-за ошибки (код ошибки {self.process.returncode})")
+                        self.master_frame.after(0, self.messages_error, "ОШИБКА", "СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
         except FileNotFoundError:
             self.master_frame.after(0, self.messages_error, "ОШИБКА", "ПУТЬ К FFMPEG НЕ НАЙДЕН")
         except Exception as e:
+            logger.error(f"Непредвиденная ошибка в download_via_ffmpeg: {e}", exc_info=True)
             self.master_frame.after(0, self.messages_error, "ОШИБКА", f"{e}")
         finally:
             self.master_frame.after(0, self.unlock_interface)
 
-    def download_via_yt_dlp(self, open_folder):
+    def download_via_yt_dlp(self, open_folder: bool) -> None:
         selected_quality = self.choose_video_qual.get()
         quality_formats = {
             'HD4K': 'bestvideo[height<=2160]+bestaudio/best',
@@ -200,50 +231,51 @@ class VideoTask: # Класс должен управлять только те�
         format_string = quality_formats.get(selected_quality, 'best')
         command = [self.setting['yt_dlp_path'], self.entry, '-f', format_string, '-o', self.output_file, '--newline', '--no-playlist', '--merge-output-format', 'mp4', "--ffmpeg-location", self.setting['ffmpeg_path']]
         try:
-            self.process = subprocess.Popen(command, stdout=subprocess.PIPE, encoding='utf-8', errors="replace")
-            for line in self.process.stdout:
-                match_search = re.search(r'\[download\]\s+(\d+(?:\.\d+)?)', line)
-                speed = re.search(r"at\s+([~0-9.]+[a-zA-Z]+/s)", line)
-                times = re.search(r"ETA\s+([\d:]+)", line)
-                if match_search:
-                    raw_value = match_search.group(1)
-                    value = float(raw_value)
-                    progress_bar_value = value / 100
-                    self.master_frame.after(0, self.progressbar.set, progress_bar_value)
-                    self.master_frame.after(0, lambda v=value: self.progress_percent.configure(text=f'{int(v)}%'))
-                if speed and times:
-                    current_time = time.time()
-                    if current_time - self.last_label_update > 2:
-                        s_val = speed.group(1)
-                        t_val = times.group(1)
-                        raw_text = f'Скорость: {s_val} | Осталось: {t_val}'
-                        self.master_frame.after(0, lambda r=raw_text: self.speedRemaining_time.configure(text=r))
-                        self.last_label_update = current_time
-            self.process.wait()
-            if self.process.returncode == 0:
-                self.is_successfully_downloaded = True
-                self.add_to_history(self.fix_vname, self.entry, "Успешно")
-                if os.path.exists(self.output_file):
-                    file_size = os.path.getsize(self.output_file)
-                    self.update_total_bytes(file_size)
-                self.master_frame.after(0, self.progress_bar_and_percent_reset, 1, "100%", "Готово", "green")
-                if open_folder:
-                    self.open_folder_after_downloading()
-            else:
-                if self.is_stopped_by_user:
-                    self.del_video_file()
-                    self.master_frame.after(0, self.progress_bar_and_percent_reset, 0, "0%", "Остановлено", "red")
+            with subprocess.Popen(command, stdout=subprocess.PIPE, encoding='utf-8', errors="replace") as self.process:
+                for line in self.process.stdout:
+                    match_search = re.search(r'\[download\]\s+(\d+(?:\.\d+)?)', line)
+                    speed = re.search(r"at\s+([~0-9.]+[a-zA-Z]+/s)", line)
+                    times = re.search(r"ETA\s+([\d:]+)", line)
+                    if match_search:
+                        raw_value = match_search.group(1)
+                        value = float(raw_value)
+                        progress_bar_value = value / 100
+                        self.master_frame.after(0, self.progressbar.set, progress_bar_value)
+                        self.master_frame.after(0, lambda v=value: self.progress_percent.configure(text=f'{int(v)}%'))
+                    if speed and times:
+                        current_time = time.time()
+                        if current_time - self.last_label_update > 2:
+                            s_val = speed.group(1)
+                            t_val = times.group(1)
+                            raw_text = f'Скорость: {s_val} | Осталось: {t_val}'
+                            self.master_frame.after(0, lambda r=raw_text: self.speedRemaining_time.configure(text=r))
+                            self.last_label_update = current_time
+                self.process.wait()
+                if self.process.returncode == 0:
+                    self.is_successfully_downloaded = True
+                    self.add_to_history(self.fix_vname, self.entry, "Успешно")
+                    if os.path.exists(self.output_file):
+                        file_size = os.path.getsize(self.output_file)
+                        self.update_total_bytes(file_size)
+                    self.master_frame.after(0, self.progress_bar_and_percent_reset, 1, "100%", "Готово", "green")
+                    if open_folder:
+                        self.open_folder_after_downloading()
                 else:
-                    self.master_frame.after(0, self.messages_error, "ОШИБКА", "СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
-                    
+                    if self.is_stopped_by_user:
+                        self.del_video_file()
+                        self.master_frame.after(0, self.progress_bar_and_percent_reset, 0, "0%", "Остановлено", "red")
+                    else:
+                        logger.error(f"Скачивание прерванно из-за ошибки {self.process.returncode}")
+                        self.master_frame.after(0, self.messages_error, "ОШИБКА", "СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
         except FileNotFoundError:
             self.master_frame.after(0, self.messages_error, "ОШИБКА", "ПУТЬ К YT-DLP НЕ НАЙДЕН")
         except Exception as e:
+            logger.error(f"Скачивание преравно из-за ошибки {e}", exc_info=True)
             self.master_frame.after(0, self.messages_error, "ОШИБКА", f"{e}")
         finally:
             self.master_frame.after(0, self.unlock_interface)
 
-    def del_video_file(self):
+    def del_video_file(self) -> None:
         folder = os.path.dirname(self.output_file)
         search_file = os.listdir(folder)
         for file in search_file:
@@ -251,22 +283,22 @@ class VideoTask: # Класс должен управлять только те�
                 file_path = os.path.join(folder, file)
                 os.remove(file_path)
 
-    def progress_bar_and_percent_reset(self, bar_value, percent_value, status_text, status_color):
+    def progress_bar_and_percent_reset(self, bar_value: float, percent_value:str, status_text: str, status_color:str) -> None:
         self.progressbar.set(bar_value)
         self.progress_percent.configure(text=percent_value)
         self.speedRemaining_time.configure(text=status_text, text_color=status_color)
 
-    def open_folder_after_downloading(self):
+    def open_folder_after_downloading(self) -> None:
         norm_path = os.path.normpath(self.output_file)
         if self.setting['save_folder_path'] and self.output_file:
             subprocess.Popen(f'explorer /select,{norm_path}')
         else:
             os.startfile(self.setting['save_folder_path'])
 
-    def messages_error(self, title, text):
+    def messages_error(self, title, text) -> None:
         messagebox.showerror(title, text)
 
-    def time_to_seconds(self, time_str):
+    def time_to_seconds(self, time_str: str) -> float:
         h, m, s = time_str.split(':')
         total_seconds = int(h) * 3600 + int(m) * 60 + float(s)
         return total_seconds
@@ -275,14 +307,6 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("M3U8 Downloader")
-        w, h = 1150, 650
-        ws = self.winfo_screenwidth()
-        hs = self.winfo_screenheight()
-        scalling = self._get_window_scaling()
-        x = int((ws-w) * scalling / 2)
-        y = int((hs-h) * scalling / 2 - 150)
-        self.geometry(f"{w}x{h}+{x}+{y}")
-
         self.setting_file = "setting.json"
         self.history_file = "history.json"
         self.setting = self.load_setting()
@@ -298,8 +322,10 @@ class App(ctk.CTk):
         self.history_lock = threading.Lock()
         self.queue_box = queue.Queue()
         for _ in range(4):
-            threading.Thread(target=self.download_all_task).start()
+            threading.Thread(target=self.download_all_task, daemon=True).start()
+        self.geometric_calculation(1150, 650)
         self.setup_ui()
+        self.protocol("WM_DELETE_WINDOW", self.on_closing_app)
 
         if self.ffmpeg_path:
             self.choose_ffmpeg_btn.configure(border_color="green")
@@ -317,6 +343,14 @@ class App(ctk.CTk):
             self.choose_download_option.set("FFMPEG")
             for row in self.all_rows:
                 row.choose_video_qual.configure(state='disabled')
+
+    def geometric_calculation(self, w: int, h: int) -> None:
+        ws = self.winfo_screenwidth()
+        hs = self.winfo_screenheight()
+        scalling = self._get_window_scaling()
+        x = int((ws-w) * scalling / 2)
+        y = int((hs-h) * scalling / 2 - 150)
+        self.geometry(f"{w}x{h}+{x}+{y}")
 
     def choose_folder_path(self):
         user_path = filedialog.askdirectory(title="Укажите папку для сохранения видео")
@@ -456,7 +490,6 @@ class App(ctk.CTk):
             with open(self.history_file, 'w', encoding='utf-8') as file:
                 json.dump(history_data, file, ensure_ascii=False, indent=4)
 
-
     def calc_rows(self):
         count_of_rows = len(self.all_rows)
         self.setting['rows_count'] = count_of_rows
@@ -528,11 +561,7 @@ class App(ctk.CTk):
                 break
 
         for row in self.all_rows:
-            row.is_stopped_by_user = True
-            if row.process:
-                subprocess.Popen(f'cmd /c taskkill /f /pid {row.process.pid} /t')
-            else:
-                row.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
+            row.stop_downloading()
 
     def pre_download_check(self):
         for row in self.all_rows:
@@ -602,6 +631,12 @@ class App(ctk.CTk):
 
             row_obj.download_task(open_folder=False)
             self.queue_box.task_done()
+
+    def on_closing_app(self):
+        
+        self.stop_all_downloads_task()
+        
+        self.destroy()
 
 # region СТАРЫЙ МНОГОПОТОЧНЫЙ РЕЖИМ
     def download_all(self):
