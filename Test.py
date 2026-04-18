@@ -3,15 +3,16 @@ import customtkinter as ctk
 import subprocess
 import threading
 from tkinter import messagebox
-import json
 import os
 from tkinter import filedialog
 import re
 import time
 import queue
-from datetime import datetime
 import logging
-from typing import TypedDict
+from settings import AppSetting, load_setting, save_setting
+from history_manager import add_to_history
+from utilities import time_to_seconds
+from download_engine import DownloadEngine
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -24,16 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DownloaderApp")
 
-class AppSetting(TypedDict):
-    ffmpeg_path: str
-    save_folder_path: str
-    yt_dlp_path: str
-    download_method: str
-    selected_qual: str
-    rows_count: int
-
 class VideoTask: # Класс должен управлять только тем что сам создал! self нужно использовать только в классе! За пределами класса использую другие названия аргументов
-    def __init__(self, master: ctk.CTkFrame, on_status_change, del_row, setting: AppSetting, get_mode, save_selected_qual, calculation_rows, total_downloaded_bytes, add_history):
+    def __init__(self, master: ctk.CTkFrame, on_status_change, del_row, setting: AppSetting, get_mode, save_selected_qual, calculation_rows, total_downloaded_bytes):
         self.master_frame = master
         self.on_status_change = on_status_change
         self.del_row = del_row
@@ -41,10 +34,9 @@ class VideoTask: # Класс должен управлять только те�
         self.get_mode = get_mode
         self.save_selected_qual = save_selected_qual
         self.calc_the_row = calculation_rows
-        self.update_total_bytes = total_downloaded_bytes
-        self.add_to_history = add_history
+        self.total_downloaded_bytes = total_downloaded_bytes
         self.process = None # Класс знает о переменной только в момент чтения этой переменной. Поэтому эту переменную нельзя создать просто в функции download_task
-
+        self.engine = None
         self.row_frame = ctk.CTkFrame(master, fg_color="transparent", border_width=2, border_color="#436241")
         self.row_frame.pack(pady=5, ipady=8)
         self.link_entry = ctk.CTkEntry(self.row_frame, width=350, placeholder_text="Ссылка .m3u8...")
@@ -85,22 +77,6 @@ class VideoTask: # Класс должен управлять только те�
         if self.is_successfully_downloaded:
             self.is_successfully_downloaded = False
 
-    def stop_downloading(self) ->None:
-        self.is_stopped_by_user = True
-        current_mode = self.get_mode()
-        if current_mode == "FFMPEG":
-            if self.process:
-                self.process.terminate()
-            else:
-                self.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
-                self.master_frame.after(0, self.unlock_interface)
-        elif current_mode == "YT-DLP":
-            if self.process:
-                subprocess.Popen(f'cmd /c taskkill /f /pid {self.process.pid} /t')
-            else:
-                self.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
-                self.master_frame.after(0, self.unlock_interface)
-    
     def del_the_row(self) -> None:
         if self._is_downloading:
             return
@@ -158,6 +134,30 @@ class VideoTask: # Класс должен управлять только те�
         self.lock_interface()
         threading.Thread(target=self.download_task, daemon=True).start()
 
+    def handle_progress(self, progress_float: float, percent_int: int) -> None:
+        self.master_frame.after(0, self.progressbar.set, progress_float)
+        self.master_frame.after(0, self.progress_percent.configure, text=f'{percent_int}%')
+
+    def handle_success(self, open_folder: bool) -> None:
+        self.is_successfully_downloaded = True
+
+        add_to_history(self.fix_vname, self.entry, "Успешно")
+
+        self.master_frame.after(0, 1, "100", "Готово", "green")
+
+        if os.path.exists(self.output_file):
+            file_size = os.path.getsize(self.output_file)
+            self.master_frame.after(0, self.total_downloaded_bytes, file_size)
+
+        if open_folder:
+            self.master_frame.after(0, self.open_folder_after_downloading)
+
+        self.master_frame.after(0, self.unlock_interface)
+
+    def handle_error(self, error_msg: str) -> None:
+        self.master_frame.after(0, self.messages_error, "ОШИБКА", error_msg)
+        self.master_frame.after(0, self.unlock_interface)
+
     def download_task(self, open_folder: bool = True) -> None:
         self.entry = self.link_entry.get().strip()
         vname = self.video_name.get().strip()
@@ -168,55 +168,18 @@ class VideoTask: # Класс должен управлять только те�
         self.output_file = os.path.join(self.setting.get('save_folder_path', ""), f"{self.fix_vname}.mp4")
         current_mode = self.get_mode()
         logger.info(f'Начинается скачивание через {current_mode}. Файл {self.fix_vname}')
+
+        self.engine = DownloadEngine(
+            on_progress=self.handle_progress,
+            on_success=lambda: self.handle_success(open_folder=open_folder),
+            on_error=self.handle_error
+        )
+
         if current_mode == 'FFMPEG':
-            self.download_via_ffmpeg(open_folder)
+            ffmpeg_path = self.setting.get("ffmpeg_path", "")
+            self.engine.download_via_ffmpeg(ffmpeg_path, self.entry, self.output_file)
         elif current_mode == 'YT-DLP':
             self.download_via_yt_dlp(open_folder)
-
-    def download_via_ffmpeg(self, open_folder: bool) -> None:
-        command = [self.setting.get('ffmpeg_path', ""), "-i", self.entry, '-c', 'copy', self.output_file]
-        try:
-            with subprocess.Popen(command, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace') as self.process:
-                total_duration = 0.0
-                for line in self.process.stderr:
-                    match_duration = re.search(r"Duration: (\d{2}:\d{2}:\d{2}\.\d{2})", line)
-                    match_time = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line)
-                    if match_duration:
-                        clean_time = match_duration.group(1)
-                        total_duration = self.time_to_seconds(clean_time)
-                    elif match_time and total_duration > 0:
-                        clean_time = match_time.group(1)
-                        current_time = self.time_to_seconds(clean_time)
-                        progress = current_time / total_duration
-                        percent = int(progress * 100)
-                        self.master_frame.after(0, self.progressbar.set, progress)
-                        self.master_frame.after(0, lambda p=percent: self.progress_percent.configure(text=f'{p}%'))
-                self.process.wait()
-                if self.process.returncode == 0:
-                    self.is_successfully_downloaded = True
-                    self.add_to_history(self.fix_vname, self.entry, "Успешно")
-                    if os.path.exists(self.output_file):
-                        file_size = os.path.getsize(self.output_file)
-                        self.update_total_bytes(file_size)
-                    self.master_frame.after(0, self.progress_bar_and_percent_reset, 1, "100%", "Готово", "green")
-                    self.master_frame.after(0, self.progressbar.set, 1.0)
-                    self.master_frame.after(0, lambda: self.progress_percent.configure(text="100%"))
-                    if open_folder:
-                        self.open_folder_after_downloading()
-                else:
-                    if self.is_stopped_by_user:
-                        self.del_video_file()
-                        self.master_frame.after(0, self.progress_bar_and_percent_reset, 0, "0%", "Остановлено", "red")
-                    else:
-                        logger.error(f"Скачивание прерванно из-за ошибки (код ошибки {self.process.returncode})")
-                        self.master_frame.after(0, self.messages_error, "ОШИБКА", "СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
-        except FileNotFoundError:
-            self.master_frame.after(0, self.messages_error, "ОШИБКА", "ПУТЬ К FFMPEG НЕ НАЙДЕН")
-        except Exception as e:
-            logger.error(f"Непредвиденная ошибка в download_via_ffmpeg: {e}", exc_info=True)
-            self.master_frame.after(0, self.messages_error, "ОШИБКА", f"{e}")
-        finally:
-            self.master_frame.after(0, self.unlock_interface)
 
     def download_via_yt_dlp(self, open_folder: bool) -> None:
         selected_quality = self.choose_video_qual.get()
@@ -253,7 +216,7 @@ class VideoTask: # Класс должен управлять только те�
                 self.process.wait()
                 if self.process.returncode == 0:
                     self.is_successfully_downloaded = True
-                    self.add_to_history(self.fix_vname, self.entry, "Успешно")
+                    add_to_history(self.fix_vname, self.entry, "Успешно")
                     if os.path.exists(self.output_file):
                         file_size = os.path.getsize(self.output_file)
                         self.update_total_bytes(file_size)
@@ -274,6 +237,17 @@ class VideoTask: # Класс должен управлять только те�
             self.master_frame.after(0, self.messages_error, "ОШИБКА", f"{e}")
         finally:
             self.master_frame.after(0, self.unlock_interface)
+
+    def stop_downloading(self) -> None:
+        self.is_stopped_by_user = True
+
+        if self.engine:
+            self.engine.stop()
+        else:
+            self.speedRemaining_time.configure(text="Ожидание...", text_color="grey")
+            self.master_frame.after(0, self.unlock_interface)
+
+
 
     def del_video_file(self) -> None:
         folder = os.path.dirname(self.output_file)
@@ -298,18 +272,11 @@ class VideoTask: # Класс должен управлять только те�
     def messages_error(self, title, text) -> None:
         messagebox.showerror(title, text)
 
-    def time_to_seconds(self, time_str: str) -> float:
-        h, m, s = time_str.split(':')
-        total_seconds = int(h) * 3600 + int(m) * 60 + float(s)
-        return total_seconds
-
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("M3U8 Downloader")
-        self.setting_file = "setting.json"
-        self.history_file = "history.json"
-        self.setting = self.load_setting()
+        self.setting = load_setting()
         self.ffmpeg_path = self.setting.get('ffmpeg_path', "")
         self.save_folder_path = self.setting.get('save_folder_path', "")
         self.yt_dlp_path = self.setting.get('yt_dlp_path', "")
@@ -358,7 +325,7 @@ class App(ctk.CTk):
             self.save_folder_path = user_path
             self.folder_path_box.set(self.save_folder_path)
             self.setting['save_folder_path'] = self.save_folder_path
-            self.save_setting()
+            save_setting(self.setting)
 
     def choose_ffmpeg_path(self):
         user_path = filedialog.askopenfilename(title="Укажите путь к FFmpeg", filetypes=[("ffmpeg.exe", "ffmpeg.exe")])
@@ -366,7 +333,7 @@ class App(ctk.CTk):
             self.ffmpeg_path = user_path
             self.choose_ffmpeg_btn.configure(border_color="green")
             self.setting['ffmpeg_path'] = self.ffmpeg_path
-            self.save_setting()
+            save_setting(self.setting)
                                            
     def choose_yt_dlp_path(self):
         user_path = filedialog.askopenfilename(title="Укажите путь к файлу запуска yt-dlp", filetypes=[('yt-dlp.exe', 'yt-dlp.exe')])
@@ -374,17 +341,21 @@ class App(ctk.CTk):
             self.yt_dlp_path = user_path
             self.choose_yt_dlp_btn.configure(border_color="green")
             self.setting['yt_dlp_path'] = self.yt_dlp_path
-            self.save_setting()
+            save_setting(self.setting)
 
     def selected_download_method(self, event):
         self.setting['download_method'] = event
-        self.save_setting()
+        save_setting(self.setting)
         if event == "FFMPEG":
             for row in self.all_rows:
                 row.choose_video_qual.configure(state="disabled")
         else:
             for row in self.all_rows:
                 row.choose_video_qual.configure(state='normal')
+    
+    def save_selected_qual_task(self, data):
+        self.setting['selected_qual'] = data
+        save_setting(self.setting)
 
     def change_global_buttn(self, button_state):
         if button_state == "normal":
@@ -451,53 +422,10 @@ class App(ctk.CTk):
         self.total_downloaded_bytes_label = ctk.CTkLabel(self.buttn_frame, text="Всего загружено: 0 ГБ", text_color="grey")
         self.total_downloaded_bytes_label.pack(pady=5)
     
-    def load_setting(self):
-        if os.path.exists(self.setting_file):
-            try:
-                with open (self.setting_file, "r", encoding="utf-8") as file:
-                    return json.load(file)
-            except json.JSONDecodeError:
-                return {'ffmpeg_path': "", 'save_folder_path': "", 'yt_dlp_path': "", 'download_method': "FFMPEG", 'selected_qual': "1080", 'rows_count': 1}
-        return {'ffmpeg_path': "", 'save_folder_path': "", 'yt_dlp_path': "", 'download_method': "FFMPEG", 'selected_qual': "1080", 'rows_count': 1}
-
-    def save_setting(self):
-        with open (self.setting_file, "w", encoding="utf-8") as file:
-            json.dump(self.setting, file, ensure_ascii=False, indent=4)
-    
-    def add_to_history(self, file_name, url, status):
-        
-        with self.history_lock:
-            if os.path.exists(self.history_file):
-                try:
-                    with open(self.history_file, 'r', encoding='utf-8') as file:
-                        history_data = json.load(file)
-                except json.JSONDecodeError:
-                    history_data = []
-            else:
-                history_data = []
-            
-            new_entry = {
-                'name': file_name,
-                'url': url,
-                'date': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                "status": status
-            }
-
-            history_data.insert(0, new_entry)
-
-            history_data = history_data[:50]
-
-            with open(self.history_file, 'w', encoding='utf-8') as file:
-                json.dump(history_data, file, ensure_ascii=False, indent=4)
-
     def calc_rows(self):
         count_of_rows = len(self.all_rows)
         self.setting['rows_count'] = count_of_rows
-        self.save_setting()
-
-    def save_selected_qual_task(self, data):
-        self.setting['selected_qual'] = data
-        self.save_setting()
+        save_setting(self.setting)
 
     def load_from_txt(self):
         file_path = filedialog.askopenfilename(title="Выберите файл с данными", filetypes=[('Text files', '*.txt')])
@@ -538,8 +466,7 @@ class App(ctk.CTk):
                             get_mode=self.choose_download_option.get, 
                             save_selected_qual=self.save_selected_qual_task, 
                             calculation_rows=self.calc_rows,
-                            total_downloaded_bytes=self.update_bytes_progress,
-                            add_history = self.add_to_history
+                            total_downloaded_bytes=self.update_bytes_progress
                             )
         self.all_rows.append(new_row)
         self.calc_rows()
