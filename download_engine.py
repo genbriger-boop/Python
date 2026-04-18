@@ -1,4 +1,5 @@
 import subprocess
+import time
 import re
 import logging
 from typing import Callable
@@ -10,11 +11,13 @@ class DownloadEngine:
     def __init__(self,
                  on_progress: Callable[[float, int], None],
                  on_success: Callable[[], None],
-                 on_error: Callable[[str], None]):
+                 on_error: Callable[[str], None],
+                 on_cancel: Callable[[], None]):
         
         self.on_progress = on_progress
         self.on_success = on_success
         self.on_error = on_error
+        self.on_cancel = on_cancel
 
         self.process = None
         self.is_stopped_by_user = False
@@ -57,5 +60,42 @@ class DownloadEngine:
                         self.on_error("СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
         except FileNotFoundError:
             self.on_error("ФАЙЛ ЗАПУСКА FFMPEG НЕ НАЙДЕН")
+        except Exception as e:
+            self.on_error(f'Ошибка FFMPEG: {e}')
+    
+    def download_via_yt_dlp(self, yt_dlp_path: str, entry: str, format_string: str, output_file: str, ffmpeg_path: str) -> None:
+        self.current_tool = "YT-DLP"
+        self.last_label_update = 0
+        command = [yt_dlp_path, entry, '-f', format_string, '-o', output_file, '--newline', '--no-playlist', '--merge-output-format', 'mp4', "--ffmpeg-location", ffmpeg_path]
+        try:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, encoding='utf-8', errors="replace") as self.process:
+                for line in self.process.stdout:
+                    match_search = re.search(r'\[download\]\s+(\d+(?:\.\d+)?)', line)
+                    speed = re.search(r"at\s+([~0-9.]+[a-zA-Z]+/s)", line)
+                    times = re.search(r"ETA\s+([\d:]+)", line)
+                    if match_search:
+                        raw_value = match_search.group(1)
+                        value = float(raw_value)
+                        progress_bar_value = value / 100
+                        self.on_progress(progress_float = progress_bar_value, percent_int = int(value))
+                    if speed and times:
+                        current_time = time.time()
+                        if current_time - self.last_label_update > 2:
+                            s_val = speed.group(1)
+                            t_val = times.group(1)
+                            raw_text = f'Скорость: {s_val} | Осталось: {t_val}'
+                            self.on_progress(sec_time_val = raw_text)
+                            self.last_label_update = current_time
+                self.process.wait()
+                if self.process.returncode == 0:
+                    self.on_success()
+                else:
+                    if self.is_stopped_by_user:
+                        self.on_cancel()
+                    else:
+                        self.on_error("СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
+                    
+        except FileNotFoundError:
+            self.on_error("ПУТЬ К YT-DLP НЕ НАЙДЕН")
         except Exception as e:
             self.on_error(f'Ошибка FFMPEG: {e}')
