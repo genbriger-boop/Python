@@ -56,7 +56,9 @@ class DownloadEngine:
                 if self.process.returncode == 0:
                     self.on_success()
                 else:
-                    if not self.is_stopped_by_user:
+                    if self.is_stopped_by_user:
+                        self.on_cancel()
+                    else:
                         self.on_error("СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
         except FileNotFoundError:
             self.on_error("ФАЙЛ ЗАПУСКА FFMPEG НЕ НАЙДЕН")

@@ -6,13 +6,11 @@ from tkinter import messagebox
 import os
 from tkinter import filedialog
 import re
-import time
-import queue
 import logging
 from settings import AppSetting, load_setting, save_setting
 from history_manager import add_to_history
-from utilities import time_to_seconds
 from download_engine import DownloadEngine
+from queue_manager import DownloadQueueManager
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -164,6 +162,7 @@ class VideoTask: # Класс должен управлять только те�
 
     def handle_error(self, error_msg: str) -> None:
         self.master_frame.after(0, self.messages_error, "ОШИБКА", error_msg)
+        self.master_frame.after(0, self.speedRemaining_time.configure, text="Ошибка", text_color="red")
         self.master_frame.after(0, self.unlock_interface)
 
     def download_task(self, open_folder: bool = True) -> None:
@@ -245,16 +244,16 @@ class App(ctk.CTk):
         self.download_method = self.setting.get('download_method', "FFMPEG")
         self.rows_count = self.setting.get('rows_count', 1)
         self.all_rows: list[VideoTask] = []
-        self.stop_all_downloads = threading.Event()
         self.total_downloaded_bytes = 0
         self.counter_lock = threading.Lock()
         self.history_lock = threading.Lock()
-        self.queue_box = queue.Queue()
-        for _ in range(4):
-            threading.Thread(target=self.download_all_task, daemon=True).start()
         self.geometric_calculation(1150, 650)
         self.setup_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_closing_app)
+
+        self.to_queue_manager = DownloadQueueManager(
+            stop_all = self.handle_cancel_all
+        )
 
         if self.ffmpeg_path:
             self.choose_ffmpeg_btn.configure(border_color="green")
@@ -439,19 +438,6 @@ class App(ctk.CTk):
             bytes_to_gb = self.total_downloaded_bytes / (1024**3)
             self.total_downloaded_bytes_label.configure(text=f'Всего загружено: {bytes_to_gb:.2f} ГБ')
 
-    def stop_all_downloads_task(self):
-        self.stop_all_downloads.set()
-
-        while not self.queue_box.empty():
-            try:
-                self.queue_box.get_nowait()
-                self.queue_box.task_done()
-            except queue.Empty:
-                break
-
-        for row in self.all_rows:
-            row.stop_downloading()
-
     def pre_download_check(self):
         for row in self.all_rows:
             if row._is_downloading:
@@ -491,35 +477,33 @@ class App(ctk.CTk):
             self.open_folder_task()
 
     def start_download_all(self):
-        threading.Thread(target=self.collect_the_tasks).start()
+        threading.Thread(target=self.add_to_queue, daemon=True).start()
 
-    def collect_the_tasks(self):
+    def add_to_queue(self):
         if not self.pre_download_check():
             return
-        self.stop_all_downloads.clear()
         task_added = False
 
         for row in self.all_rows:
             if not row.is_successfully_downloaded:
-                self.queue_box.put(row)
+                self.to_queue_manager.add_to_queue_task(row)
                 task_added = True
+            else:
+                row.master_frame.after(0, row.progress_bar_and_percent_reset, 1, "100%", "Уже скачано", "red")
 
         if task_added:
-            self.queue_box.join()
-            if not self.stop_all_downloads.is_set():
-                if any(row.is_successfully_downloaded for row in self.all_rows):
-                    self.open_folder_task()
+            self.to_queue_manager.wait_all_tasks()
+            if any(row.is_successfully_downloaded for row in self.all_rows):
+                self.open_folder_task()
 
-    def download_all_task(self):
-        while True:
-            row_obj = self.queue_box.get()
+    def stop_all_downloads_task(self):
 
-            if self.stop_all_downloads.is_set():
-                self.queue_box.task_done()
-                continue
+        self.to_queue_manager.stop_downloads()
 
-            row_obj.download_task(open_folder=False)
-            self.queue_box.task_done()
+    def handle_cancel_all(self):
+
+        for row in self.all_rows:
+            row.stop_downloading()
 
     def on_closing_app(self):
         
@@ -527,7 +511,7 @@ class App(ctk.CTk):
         
         self.destroy()
 
-# region СТАРЫЙ МНОГОПОТОЧНЫЙ РЕЖИМ
+# region СТАРЫЙ МНОГОПОТОЧНЫЙ РЕЖИМ (НЕ ИСПОЛЬЗУЕТСЯ)
     def download_all(self):
         if not self.pre_download_check():
             return
