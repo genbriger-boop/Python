@@ -1,8 +1,8 @@
 {
     "ffmpeg_path": "D:/Программы/FFmpeg/ffmpeg-7.1.1/bin/ffmpeg.exe",
-    "save_folder_path": "D:/Тест",
+    "save_folder_path": "C:/Users/DreFromDream/Desktop",
     "yt_dlp_path": "D:/Программы/FFmpeg/yt-dlp.exe",
     "download_method": "YT-DLP",
     "selected_qual": "1080",
-    "rows_count": 1
+    "rows_count": 2
 }

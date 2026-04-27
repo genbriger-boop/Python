@@ -57,7 +57,7 @@ class DownloadEngine:
                     self.on_success()
                 else:
                     if self.is_stopped_by_user:
-                        self.on_cancel()
+                        self.on_cancel(0, "0%", "Отменено", "red")
                     else:
                         self.on_error("СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
         except FileNotFoundError:
@@ -93,11 +93,11 @@ class DownloadEngine:
                     self.on_success()
                 else:
                     if self.is_stopped_by_user:
-                        self.on_cancel()
+                        self.on_cancel(0, "0%", "Отменено", "red")
                     else:
                         self.on_error("СКАЧИВАНИЕ ПРЕРВАНО ИЗ-ЗА ОШИБКИ")
                     
         except FileNotFoundError:
             self.on_error("ПУТЬ К YT-DLP НЕ НАЙДЕН")
         except Exception as e:
-            self.on_error(f'Ошибка FFMPEG: {e}')
+            self.on_error(f'Ошибка YT-DLP: {e}')

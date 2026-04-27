@@ -1,7 +1,6 @@
 import queue
 import threading
 
-
 class DownloadQueueManager:
     def __init__(self, stop_all):
         self.stop_all_downloads = threading.Event()

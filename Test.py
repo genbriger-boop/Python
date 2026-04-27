@@ -11,6 +11,7 @@ from settings import AppSetting, load_setting, save_setting
 from history_manager import add_to_history
 from download_engine import DownloadEngine
 from queue_manager import DownloadQueueManager
+from load_from_txt import parse_txt_file
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -162,7 +163,7 @@ class VideoTask: # Класс должен управлять только те�
 
     def handle_error(self, error_msg: str) -> None:
         self.master_frame.after(0, self.messages_error, "ОШИБКА", error_msg)
-        self.master_frame.after(0, self.speedRemaining_time.configure, text="Ошибка", text_color="red")
+        self.master_frame.after(0, self.speedRemaining_time.configure, text="ОШИБКА", text_color="red")
         self.master_frame.after(0, self.unlock_interface)
 
     def download_task(self, open_folder: bool = True) -> None:
@@ -366,7 +367,7 @@ class App(ctk.CTk):
         self.first_btn_frame.pack()
         self.add_row_btn = ctk.CTkButton(self.first_btn_frame, text="ДОБАВИТЬ ВИДЕО", font=("Arial", 14, "bold"), width=150, command=self.add_new_row)
         self.add_row_btn.pack(side='left', pady=10, padx=20)
-        self.load_txt_btn = ctk.CTkButton(self.first_btn_frame, text="ИМПОРТ ИЗ TXT", font=("Arial", 14, "bold"), width=150, command=self.load_from_txt)
+        self.load_txt_btn = ctk.CTkButton(self.first_btn_frame, text="ИМПОРТ ИЗ TXT", font=("Arial", 14, "bold"), width=150, command=self.load_from_txt_filedialog)
         self.load_txt_btn.pack(side='left')
         self.four_btn_frame = ctk.CTkFrame(self.buttn_frame, fg_color="transparent")
         self.four_btn_frame.pack(pady=10)
@@ -388,24 +389,16 @@ class App(ctk.CTk):
         self.setting['rows_count'] = count_of_rows
         save_setting(self.setting)
 
-    def load_from_txt(self):
+    def load_from_txt_filedialog(self):
+
         file_path = filedialog.askopenfilename(title="Выберите файл с данными", filetypes=[('Text files', '*.txt')])
 
         if not file_path:
             return
-        
-        with open(file_path, 'r', encoding='utf-8') as file:
-            data = file.readlines()
-        
-        links_list = []
-        for d in data:
-            parts = d.strip()
-            if parts:
-                links_list.append(parts)
-        
-        combine_data = list(zip(links_list[::2], links_list[1::2]))
 
-        for link, name in combine_data:
+        pair_up_lines = parse_txt_file(file_path)
+
+        for link, name in pair_up_lines:
             if not (link.startswith('http') and link.endswith('.m3u8')):
                 messagebox.showerror("ОШИБКА", "НЕ ВСЕ ДАННЫЕ СООТВЕТСТВУЮТ СТАНДАРТУ.\nПРОВЕРЬТЕ ССЫЛКИ И НАЗВАНИЯ")
                 return
@@ -413,7 +406,7 @@ class App(ctk.CTk):
         for row in self.all_rows[:]:
             row.del_the_row()
 
-        for link, name in combine_data:
+        for link, name in pair_up_lines:
             self.add_new_row()
             last_row = self.all_rows[-1]
             last_row.link_entry.insert(0, link)

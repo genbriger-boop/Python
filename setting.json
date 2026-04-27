@@ -1,8 +1,8 @@
 {
-    "ffmpeg_path": "D:/Программы/FFmpeg/ffmpeg-7.1.1/bin/ffmpeg.exe",
-    "save_folder_path": "D:/Тест",
-    "yt_dlp_path": "D:/Программы/FFmpeg/yt-dlp.exe",
+    "ffmpeg_path": "",
+    "save_folder_path": "",
+    "yt_dlp_path": "",
     "download_method": "FFMPEG",
-    "selected_qual": "1080",
+    "selected_qual": "HQ2K",
     "rows_count": 1
 }
