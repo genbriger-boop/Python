@@ -7,8 +7,8 @@ import os
 from tkinter import filedialog
 import subprocess
 import re
-from settings import AppSetting, load_setting, save_setting
-from history_manager import add_to_history
+from settings import AppSetting, load_setting
+from history_manager import HistoryManager
 from download_engine import DownloadEngine
 from queue_manager import DownloadQueueManager
 from load_from_txt import parse_txt_file
@@ -157,26 +157,23 @@ class VideoRowUI:
 
 
 class VideoTaskManager:
-    def __init__(self, ui_row: VideoRowUI, setting: AppSetting, app_delete_callback, bytes_progress, on_status_change, current_mode):
+    def __init__(self, ui_row: VideoRowUI, setting: AppSetting, app_delete_callback, bytes_progress, on_status_change, current_mode, history_story: HistoryManager):
         self.ui_row = ui_row
         self.settings = setting
         self.app_delete_callback = app_delete_callback
         self.bytes_progress = bytes_progress
         self.on_status_change = on_status_change
         self.current_mode = current_mode
+        self.history_story = history_story
 
         self._is_downloading = False
         self.is_successfully_downloaded = False
         self.is_stopped_by_user = False
         self.engine = False
-        self.counter_lock = threading.Lock()
 
         self.current_link = ""
         self.current_vname = ""
         self.output_file = ""
-
-        self.total_downloaded_bytes = 0
-
 
         self.ui_row.set_download_callback(self.preparing_to_download)
         self.ui_row.set_delete_callback(self.handle_delete_request)
@@ -191,15 +188,15 @@ class VideoTaskManager:
         if not self.ui_row.link_entry.get().strip() or not self.ui_row.video_name.get().strip():
             self.ui_row.handle_error(error_msg_mass="ЗАПОЛНИТЕ ВСЕ ПОЛЯ ДЛЯ ЗАГРУЗКИ ВИДЕО ФАЙЛОВ")
             return False
-        if not self.settings['save_folder_path']:
+        if not self.settings.save_folder_path:
              self.ui_row.handle_error(error_msg_mass="НЕ УКАЗАНА ПАПКА ДЛЯ СОХРАНЕНИЯ ВИДЕО")
              return False
         if self.current_mode() == "FFMPEG":
-            if not self.settings['ffmpeg_path']:
+            if not self.settings.ffmpeg_path:
                 self.ui_row.handle_error(error_msg_mass="НЕ УКАЗАН ПУТЬ К FFMPEG")
                 return False
         elif self.current_mode() == "YT-DLP":
-            if not self.settings['yt_dlp_path']:
+            if not self.settings.yt_dlp_path:
                 self.ui_row.handle_error(error_msg_mass="НЕ УКАЗАН ПУТЬ К YT-DLP")
                 return False
         self.current_link = self.ui_row.link_entry.get().strip()
@@ -216,16 +213,16 @@ class VideoTaskManager:
         if not video_link or not video_name:
             self.ui_row.handle_error("ЗАПОЛНИТЕ ВСЕ ПОЛЯ")
             return
-        if not self.settings.get("save_folder_path", ""):
+        if not self.settings.save_folder_path:
             self.ui_row.handle_error("НЕ ВЫБРАНА ПАПКА ДЛЯ СОХРАНЕНИЯ ВИДЕО")
             return
         current_mode = self.current_mode()
         if current_mode == "FFMPEG":
-            if not self.settings['ffmpeg_path']:
+            if not self.settings.ffmpeg_path:
                 self.ui_row.handle_error("НЕ УКАЗАН ПУТЬ К FFMPEG")
                 return
         elif current_mode == "YT-DLP":
-            if not self.settings['yt_dlp_path']:
+            if not self.settings.yt_dlp_path:
                 self.ui_row.handle_error("НЕ УКАЗАН ПУТЬ К YT-DLP")
                 return
         self.current_link = video_link
@@ -247,7 +244,7 @@ class VideoTaskManager:
         if self.is_stopped_by_user:
             logger.warning("Скачивание видео отменено до начала загрузки")
             return
-        self.output_file = os.path.join(self.settings.get('save_folder_path', ""), f"{self.current_vname}.mp4")
+        self.output_file = os.path.join(self.settings.save_folder_path, f"{self.current_vname}.mp4")
         current_mode = self.current_mode()
         logger.info(f'Начинается скачивание через {current_mode}. Файл {self.current_vname}')
 
@@ -258,12 +255,12 @@ class VideoTaskManager:
             on_cancel=self.handle_cancel
         )
 
-        ffmpeg_path = self.settings.get("ffmpeg_path", "")
+        ffmpeg_path = self.settings.ffmpeg_path
 
         if current_mode == 'FFMPEG':
             self.engine.download_via_ffmpeg(ffmpeg_path, self.current_link, self.output_file)
         elif current_mode == 'YT-DLP':
-            yt_dlp_path = self.settings.get('yt_dlp_path', "")
+            yt_dlp_path = self.settings.yt_dlp_path
             selected_quality = self.ui_row.choose_video_qual.get()
             quality_formats = {
                 'HD4K': 'bestvideo[height<=2160]+bestaudio/best',
@@ -285,13 +282,13 @@ class VideoTaskManager:
     def handle_success(self, open_folder: bool) -> None:
         self.is_successfully_downloaded = True
 
-        add_to_history(self.current_vname, self.current_link, "Успешно")
+        self.history_story.add_to_history(self.current_vname, self.current_link, "Успешно")
 
         self.ui_row.progress_bar_and_percent_reset(1, "100", "Готово", "green")
 
         if os.path.exists(self.output_file):
             file_size = os.path.getsize(self.output_file)
-            self.update_bytes_progress(file_size)
+            self.bytes_progress(file_size)
 
         if open_folder:
             self.open_folder_after_downloading()
@@ -325,18 +322,12 @@ class VideoTaskManager:
                 self.on_status_change('normal')
                 self.ui_row.handle_cancel(0, "0%", "Ожидание...", "grey")
 
-    def update_bytes_progress(self, new_bytes):
-        with self.counter_lock:
-            self.total_downloaded_bytes += new_bytes
-            bytes_to_gb = self.total_downloaded_bytes / (1024**3)
-            self.bytes_progress(bytes_to_gb)
-
     def open_folder_after_downloading(self) -> None:
         norm_path = os.path.normpath(self.output_file)
-        if self.settings['save_folder_path'] and self.output_file:
+        if self.settings.save_folder_path and self.output_file:
             subprocess.Popen(f'explorer /select,{norm_path}')
         else:
-            os.startfile(self.settings['save_folder_path'])
+            os.startfile(self.settings.save_folder_path)
 
     def handle_delete_request(self):
         if self._is_downloading:
@@ -352,8 +343,8 @@ class VideoTaskManager:
 
     def save_selected_video_quality(self, qual_value):
         if self.settings:
-            self.settings["selected_qual"] = qual_value
-            save_setting(self.settings)
+            self.settings.selected_qual = qual_value
+            self.settings.save()
 
     def handle_load_from_txt_link_and_name(self, link, name):
         current_mode=self.current_mode()
@@ -368,26 +359,31 @@ class VideoTaskManager:
         self.ui_row.progress_bar_and_percent_reset(bar_value, percent_value, status_text, status_color)
 
     def del_video_file_after_cancel (self):
+        if not self.output_file:
+            return
         dirname = os.path.dirname(self.output_file)
+        if not os.path.exists(dirname):
+            return
         list_dir = os.listdir(dirname)
+        safe_prefix = f"{self.current_vname}."
         for file in list_dir:
-            if file.startswith(f'{self.current_vname}'):
+            if file == self.current_vname or file.startswith(safe_prefix):
                 file_path = os.path.join(dirname, file)
-                os.remove(file_path)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении файла {file_path}: {e}")
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("M3U8 Downloader")
         self.setting = load_setting()
-        self.ffmpeg_path = self.setting.get('ffmpeg_path', "")
-        self.save_folder_path = self.setting.get('save_folder_path', "")
-        self.yt_dlp_path = self.setting.get('yt_dlp_path', "")
-        self.download_method = self.setting.get('download_method', "FFMPEG")
-        self.rows_count = self.setting.get('rows_count', 1)
         self.all_rows: list[VideoTaskManager] = []
         self.total_downloaded_bytes = 0
         self.stop_all_downloads = threading.Event()
+        self.counter_lock = threading.Lock()
 
         self.geometric_calculation(1150, 650)
         self.setup_ui()
@@ -396,16 +392,17 @@ class App(ctk.CTk):
         self.to_queue_manager = DownloadQueueManager(
             stop_all = self.handle_cancel_all
         )
+        self.history_story = HistoryManager()
 
-        if self.ffmpeg_path:
+        if self.setting.ffmpeg_path:
             self.choose_ffmpeg_btn.configure(border_color="green")
-        if self.yt_dlp_path:
+        if self.setting.yt_dlp_path:
             self.choose_yt_dlp_btn.configure(border_color="green")
 
-        for _ in range(self.rows_count):
+        for _ in range(self.setting.rows_count):
             self.add_new_row()
 
-        if self.download_method == "YT-DLP":        
+        if self.setting.download_method == "YT-DLP":        
             self.choose_download_option.set("YT-DLP")
             for row in self.all_rows:
                 row.handle_choose_video_qual_state(state="normal")
@@ -425,30 +422,27 @@ class App(ctk.CTk):
     def choose_folder_path(self):
         user_path = filedialog.askdirectory(title="Укажите папку для сохранения видео")
         if user_path:
-            self.save_folder_path = user_path
-            self.folder_path_box.set(self.save_folder_path)
-            self.setting['save_folder_path'] = self.save_folder_path
-            save_setting(self.setting)
+            self.setting.save_folder_path = user_path
+            self.folder_path_box.set(self.setting.save_folder_path)
+            self.setting.save()
 
     def choose_ffmpeg_path(self):
         user_path = filedialog.askopenfilename(title="Укажите путь к FFmpeg", filetypes=[("ffmpeg.exe", "ffmpeg.exe")])
         if user_path:
-            self.ffmpeg_path = user_path
+            self.setting.ffmpeg_path = user_path
             self.choose_ffmpeg_btn.configure(border_color="green")
-            self.setting['ffmpeg_path'] = self.ffmpeg_path
-            save_setting(self.setting)
+            self.setting.save()
                                            
     def choose_yt_dlp_path(self):
         user_path = filedialog.askopenfilename(title="Укажите путь к файлу запуска yt-dlp", filetypes=[('yt-dlp.exe', 'yt-dlp.exe')])
         if user_path:
-            self.yt_dlp_path = user_path
+            self.setting.yt_dlp_path = user_path
             self.choose_yt_dlp_btn.configure(border_color="green")
-            self.setting['yt_dlp_path'] = self.yt_dlp_path
-            save_setting(self.setting)
+            self.setting.save()
 
     def selected_download_method(self, event):
-        self.setting['download_method'] = event
-        save_setting(self.setting)
+        self.setting.download_method = event
+        self.setting.save()
         if event == "FFMPEG":
             for row in self.all_rows:
                 row.handle_choose_video_qual_state(state="disabled")
@@ -457,8 +451,8 @@ class App(ctk.CTk):
                 row.handle_choose_video_qual_state(state='normal')
     
     def save_selected_qual_task(self, data):
-        self.setting['selected_qual'] = data
-        save_setting(self.setting)
+        self.setting.selected_qual = data
+        self.setting.save()
 
     def change_global_buttn(self, button_state):
         if button_state == "normal":
@@ -478,17 +472,17 @@ class App(ctk.CTk):
         self.add_new_row()
 
     def open_folder_task(self):
-        if not self.save_folder_path:
+        if not self.setting.save_folder_path:
             messagebox.showerror("ОШИБКА", "ПАПКА НЕ ВЫБРАНА")
             return
-        os.startfile(self.save_folder_path)
+        os.startfile(self.setting.save_folder_path)
 
     def setup_ui(self):
         self.save_folder_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.save_folder_frame.pack(pady=5)
         self.path_label = ctk.CTkLabel(self.save_folder_frame, text="Сохранять в:")
         self.path_label.pack(side="left", padx=3)
-        self.folder_path_box = ctk.StringVar(value=self.save_folder_path)
+        self.folder_path_box = ctk.StringVar(value=self.setting.save_folder_path)
         self.path_entry = ctk.CTkEntry(self.save_folder_frame, width=300, textvariable=self.folder_path_box, state="disabled")
         self.path_entry.pack(side="left", padx=5)
         self.choose_folder_btn = ctk.CTkButton(self.save_folder_frame, text="Обзор", fg_color="blue", width=1, command=self.choose_folder_path)
@@ -528,8 +522,8 @@ class App(ctk.CTk):
     
     def calc_rows(self):
         count_of_rows = len(self.all_rows)
-        self.setting['rows_count'] = count_of_rows
-        save_setting(self.setting)
+        self.setting.rows_count = count_of_rows
+        self.setting.save()
 
     def load_from_txt_filedialog(self):
 
@@ -549,7 +543,7 @@ class App(ctk.CTk):
             last_row.handle_load_from_txt_link_and_name(link, name)
 
     def add_new_row(self):
-        default_quality = self.setting.get('selected_qual', '1080')
+        default_quality = self.setting.selected_qual
         
         new_row_ui = VideoRowUI(self.main_frame, default_qual=default_quality)
         video_task_manager = VideoTaskManager(ui_row=new_row_ui,    
@@ -557,14 +551,17 @@ class App(ctk.CTk):
                                               app_delete_callback = self.remove_from_all_rows,
                                               bytes_progress = self.update_bytes_progress,
                                               on_status_change = self.change_global_buttn,
-                                              current_mode = self.choose_download_option.get
+                                              current_mode = self.choose_download_option.get,
+                                              history_story = self.history_story
                                               )
         self.all_rows.append(video_task_manager)
         self.calc_rows()
 
     def update_bytes_progress(self, new_bytes):
-
-        self.total_downloaded_bytes_label.configure(text=f'Всего загружено: {new_bytes:.2f} ГБ')
+        with self.counter_lock:
+            self.total_downloaded_bytes += new_bytes
+            bytes_to_gb = self.total_downloaded_bytes / (1024**3)
+            self.after(0, lambda: self.total_downloaded_bytes_label.configure(text=f'Всего загружено: {bytes_to_gb:.2f} ГБ'))
 
     def pre_download_check(self):
         for row in self.all_rows:
@@ -621,6 +618,8 @@ class App(ctk.CTk):
     def on_closing_app(self):
         
         self.stop_all_downloads_task()
+
+        self.history_story.save()
         
         self.destroy()
 
