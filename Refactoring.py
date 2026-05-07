@@ -1,4 +1,3 @@
-import tkinter as tk
 import customtkinter as ctk
 import logging
 import threading
@@ -9,9 +8,10 @@ import subprocess
 import re
 from settings import AppSetting, load_setting
 from history_manager import HistoryManager
-from download_engine import DownloadEngine
+from download_engine import FFMPEGDownloader, YTDLPDownoader
 from queue_manager import DownloadQueueManager
 from load_from_txt import parse_txt_file
+from dataclasses import asdict
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -248,20 +248,25 @@ class VideoTaskManager:
         current_mode = self.current_mode()
         logger.info(f'Начинается скачивание через {current_mode}. Файл {self.current_vname}')
 
-        self.engine = DownloadEngine(
-            on_progress=self.handle_progress,
-            on_success=lambda: self.handle_success(open_folder=open_folder),
-            on_error=self.handle_errors,
-            on_cancel=self.handle_cancel
-        )
+        download_kwargs = asdict(self.settings)
+        engine_callbacks = {
+            'on_progress': self.handle_progress,
+            'on_success': lambda: self.handle_success(open_folder=open_folder),
+            'on_error': self.handle_errors,
+            'on_cancel': self.handle_cancel
+        }
 
-        ffmpeg_path = self.settings.ffmpeg_path
+        download_kwargs['url'] = self.current_link
+        download_kwargs['output_file'] = self.output_file
 
-        if current_mode == 'FFMPEG':
-            self.engine.download_via_ffmpeg(ffmpeg_path, self.current_link, self.output_file)
-        elif current_mode == 'YT-DLP':
-            yt_dlp_path = self.settings.yt_dlp_path
+        if current_mode == "FFMPEG":
+
+            self.engine = FFMPEGDownloader(**engine_callbacks)
+            
+        else:
+
             selected_quality = self.ui_row.choose_video_qual.get()
+
             quality_formats = {
                 'HD4K': 'bestvideo[height<=2160]+bestaudio/best',
                 'HQ2K': 'bestvideo[height<=1440]+bestaudio/best',
@@ -271,7 +276,12 @@ class VideoTaskManager:
                 '360': 'bestvideo[height<=360]+bestaudio/best'
             }
             format_string = quality_formats.get(selected_quality, 'best')
-            self.engine.download_via_yt_dlp(yt_dlp_path, self.current_link, format_string, self.output_file, ffmpeg_path) 
+
+            download_kwargs['format_string'] = format_string
+
+            self.engine = YTDLPDownoader(**engine_callbacks)
+
+        self.engine.start_download(**download_kwargs)
 
     def handle_progress(self, progress_float: float = None, percent_int: int = None, sec_time_val: str = None):
         if progress_float is not None and percent_int is not None:

@@ -36,9 +36,8 @@ class HistoryManager:
             }
             self.history_data.appendleft(new_entry)
             #region ДОБАВЛЯЛ НА ПЕРВУЮ ПОЗИЦИЮ КОГДА ИСПОЛЬЗОВАЛ СПИСОК (НЕ ИСПОЛЬЗУЮ УЖЕ)
-            self.history_data.insert(0, new_entry)
-            self.history_data = self.history_data[:50]
-            print(self.history_data)
+            #self.history_data.insert(0, new_entry)
+            #self.history_data = self.history_data[:50]
             #endregion
 
     def save(self):

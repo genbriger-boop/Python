@@ -21,21 +21,32 @@ class DownloadEngine:
 
         self.process = None
         self.is_stopped_by_user = False
-        self.current_tool = None
 
     def stop(self) -> None:
         self.is_stopped_by_user = True
         if self.process:
            try:
-               if self.current_tool == "YT-DLP":
-                   subprocess.Popen(f'cmd /c taskkill /f /pid {self.process.pid} /t')
-               else:
-                   self.process.terminate()
+               self._stop_process()
            except Exception as e:
                logger.error(f'Ошибка при остановке процесса: {e}')
+    
+    def _stop_process(self):
+        raise NotImplementedError("Метод должен быть написан внутри класса-наследника")
+    
+    def start_download(self, **kwargs):
+        raise NotImplementedError("Метод должен быть написан внутри класса-наследник")
 
-    def download_via_ffmpeg(self, ffmpeg_path: str, url: str, output_file: str) -> None:
-        self.current_tool = "FFMPEG"
+class FFMPEGDownloader(DownloadEngine):
+
+    def _stop_process(self):
+        self.process.terminate()
+
+    def start_download(self, **kwargs) -> None:
+
+        ffmpeg_path = kwargs.get('ffmpeg_path')
+        url = kwargs.get('url')
+        output_file = kwargs.get('output_file')
+
         command = [ffmpeg_path, "-i", url, '-c', 'copy', output_file]
         try:
             with subprocess.Popen(command, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace') as self.process:
@@ -65,10 +76,23 @@ class DownloadEngine:
         except Exception as e:
             self.on_error(f'Ошибка FFMPEG: {e}')
     
-    def download_via_yt_dlp(self, yt_dlp_path: str, entry: str, format_string: str, output_file: str, ffmpeg_path: str) -> None:
-        self.current_tool = "YT-DLP"
+
+class YTDLPDownoader(DownloadEngine):
+
+    def _stop_process(self):
+        
+        subprocess.Popen(f'cmd /c taskkill /f /pid {self.process.pid} /t')
+
+    def start_download(self, **kwargs) -> None:
+
+        yt_dlp_path = kwargs.get('yt_dlp_path')
+        url = kwargs.get('url')
+        format_string = kwargs.get('format_string')
+        output_file = kwargs.get('output_file')
+        ffmpeg_path = kwargs.get('ffmpeg_path')
+
         self.last_label_update = 0
-        command = [yt_dlp_path, entry, '-f', format_string, '-o', output_file, '--newline', '--no-playlist', '--merge-output-format', 'mp4', "--ffmpeg-location", ffmpeg_path]
+        command = [yt_dlp_path, url, '-f', format_string, '-o', output_file, '--newline', '--no-playlist', '--merge-output-format', 'mp4', "--ffmpeg-location", ffmpeg_path]
         try:
             with subprocess.Popen(command, stdout=subprocess.PIPE, encoding='utf-8', errors="replace") as self.process:
                 for line in self.process.stdout:
